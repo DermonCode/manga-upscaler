@@ -50,7 +50,8 @@
   const cache = new Map();
   let cacheBytes = 0;
   const queue = [];
-  let running = false;
+  let activeCount = 0;
+  const MAX_CONCURRENT = 1;
 
   function getSegment() {
     const parts = window.location.pathname.split('/');
@@ -76,44 +77,49 @@
     img.style.imageRendering = 'auto';
   }
 
-  async function runQueue() {
-    if (running || queue.length === 0) return;
-    running = true;
-    while (queue.length > 0) {
-      const img = queue.shift();
-      if (!img.isConnected) continue;
-      const originalSrc = img.src;
-      if (cache.has(originalSrc)) {
-        applyResult(img, cache.get(originalSrc));
-        continue;
-      }
-      console.log('[MangaUpscaler] processing:', originalSrc.slice(0, 80));
-      try {
-        const requestId = crypto.randomUUID();
-        const result = await new Promise((resolve, reject) => {
-          function handler(msg) {
-            if (msg.type === 'upscaleResult' && msg.requestId === requestId) {
-              chrome.runtime.onMessage.removeListener(handler);
-              if (msg.error) reject(new Error(msg.error));
-              else resolve(msg.result);
-            }
-          }
-          chrome.runtime.onMessage.addListener(handler);
-          chrome.runtime.sendMessage({ type: 'upscale', requestId, url: originalSrc, segment: getSegment() }, () => {
-            if (chrome.runtime.lastError) {}
-          });
-        });
-        const blob = await fetch(result).then(r => r.blob());
-        const blobUrl = URL.createObjectURL(blob);
-        cacheBytes += blob.size;
-        cache.set(originalSrc, blobUrl);
-        console.log('[MangaUpscaler] done, replacing image');
-        applyResult(img, blobUrl);
-      } catch (e) {
-        console.error('[MangaUpscaler] error processing image:', e);
-      }
+  async function processImage(img) {
+    if (!img.isConnected) return;
+    const originalSrc = img.src;
+    if (cache.has(originalSrc)) {
+      applyResult(img, cache.get(originalSrc));
+      return;
     }
-    running = false;
+    console.log('[MangaUpscaler] processing:', originalSrc.slice(0, 80));
+    try {
+      const requestId = crypto.randomUUID();
+      const result = await new Promise((resolve, reject) => {
+        function handler(msg) {
+          if (msg.type === 'upscaleResult' && msg.requestId === requestId) {
+            chrome.runtime.onMessage.removeListener(handler);
+            if (msg.error) reject(new Error(msg.error));
+            else resolve(msg.result);
+          }
+        }
+        chrome.runtime.onMessage.addListener(handler);
+        chrome.runtime.sendMessage({ type: 'upscale', requestId, url: originalSrc, segment: getSegment() }, () => {
+          if (chrome.runtime.lastError) {}
+        });
+      });
+      const blob = await fetch(result).then(r => r.blob());
+      const blobUrl = URL.createObjectURL(blob);
+      cacheBytes += blob.size;
+      cache.set(originalSrc, blobUrl);
+      console.log('[MangaUpscaler] done, replacing image');
+      applyResult(img, blobUrl);
+    } catch (e) {
+      console.error('[MangaUpscaler] error processing image:', e);
+    }
+  }
+
+  function runQueue() {
+    while (queue.length > 0 && activeCount < MAX_CONCURRENT) {
+      activeCount++;
+      const img = queue.shift();
+      processImage(img).finally(() => {
+        activeCount--;
+        runQueue();
+      });
+    }
   }
 
   function isMangaImage(img) {

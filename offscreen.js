@@ -49,81 +49,83 @@ async function upscale(url, scale) {
   const TILE = 256;
   const PAD = 16;
 
+  const t0 = performance.now();
   console.log('[MangaUpscaler Offscreen] fetching image:', url.slice(0, 60));
   const blob = await fetch(url).then((r) => r.blob());
-  const blobUrl = URL.createObjectURL(blob);
+    const blobUrl = URL.createObjectURL(blob);
 
-  const img = await new Promise((resolve, reject) => {
-    const el = new Image();
-    el.onload = () => resolve(el);
-    el.onerror = () => reject(new Error('image load failed: ' + url));
-    el.src = blobUrl;
-  });
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('image load failed: ' + url));
+      el.src = blobUrl;
+    });
 
-  const W = img.naturalWidth;
-  const H = img.naturalHeight;
-  console.log('[MangaUpscaler Offscreen] image size:', W, 'x', H);
+    const W = img.naturalWidth;
+    const H = img.naturalHeight;
+    console.log('[MangaUpscaler Offscreen] image size:', W, 'x', H);
 
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width = W;
-  srcCanvas.height = H;
-  srcCanvas.getContext('2d').drawImage(img, 0, 0);
-  URL.revokeObjectURL(blobUrl);
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = W;
+    srcCanvas.height = H;
+    srcCanvas.getContext('2d').drawImage(img, 0, 0);
+    URL.revokeObjectURL(blobUrl);
 
-  const outCanvas = document.createElement('canvas');
-  outCanvas.width = W * SCALE;
-  outCanvas.height = H * SCALE;
-  const outCtx = outCanvas.getContext('2d');
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = W * SCALE;
+    outCanvas.height = H * SCALE;
+    const outCtx = outCanvas.getContext('2d');
 
-  let tileCount = 0;
-  const totalTiles = Math.ceil(H / TILE) * Math.ceil(W / TILE);
+    const FIXED = TILE + 2 * PAD;
+    const totalTiles = Math.ceil(H / TILE) * Math.ceil(W / TILE);
+    let tileCount = 0;
 
-  for (let ty = 0; ty < H; ty += TILE) {
-    for (let tx = 0; tx < W; tx += TILE) {
-      const x0 = Math.max(0, tx - PAD);
-      const y0 = Math.max(0, ty - PAD);
-      const x1 = Math.min(W, tx + TILE + PAD);
-      const y1 = Math.min(H, ty + TILE + PAD);
-      const tw = x1 - x0;
-      const th = y1 - y0;
+    for (let ty = 0; ty < H; ty += TILE) {
+      for (let tx = 0; tx < W; tx += TILE) {
+        const x0 = Math.max(0, tx - PAD);
+        const y0 = Math.max(0, ty - PAD);
+        const x1 = Math.min(W, tx + TILE + PAD);
+        const y1 = Math.min(H, ty + TILE + PAD);
+        const tw = x1 - x0;
+        const th = y1 - y0;
 
-      const FIXED = TILE + 2 * PAD;
-      const tileCanvas2 = document.createElement('canvas');
-      tileCanvas2.width = FIXED;
-      tileCanvas2.height = FIXED;
-      tileCanvas2.getContext('2d').drawImage(srcCanvas, x0, y0, tw, th, 0, 0, tw, th);
-      const tileData = tileCanvas2.getContext('2d').getImageData(0, 0, FIXED, FIXED);
-      const inputTensor = toTensor(tileData.data, FIXED, FIXED);
+        const tileCanvas = document.createElement('canvas');
+        tileCanvas.width = FIXED;
+        tileCanvas.height = FIXED;
+        tileCanvas.getContext('2d').drawImage(srcCanvas, x0, y0, tw, th, 0, 0, tw, th);
+        const tileData = tileCanvas.getContext('2d').getImageData(0, 0, FIXED, FIXED);
+        const inputTensor = toTensor(tileData.data, FIXED, FIXED);
 
-      const feeds = {};
-      feeds[sess.inputNames[0]] = inputTensor;
-      const results = await sess.run(feeds);
-      const outTensor = results[sess.outputNames[0]];
+        const feeds = {};
+        feeds[sess.inputNames[0]] = inputTensor;
+        const results = await sess.run(feeds);
+        const outTensor = results[sess.outputNames[0]];
 
-      const [, , outTH, outTW] = outTensor.dims;
-      const outImageData = tensorToImageData(outTensor.data, outTW, outTH);
+        const [, , outTH, outTW] = outTensor.dims;
+        const outImageData = tensorToImageData(outTensor.data, outTW, outTH);
 
-      const tmpCanvas = document.createElement('canvas');
-      tmpCanvas.width = outTW;
-      tmpCanvas.height = outTH;
-      tmpCanvas.getContext('2d').putImageData(outImageData, 0, 0);
+        const tmpCanvas = document.createElement('canvas');
+        tmpCanvas.width = outTW;
+        tmpCanvas.height = outTH;
+        tmpCanvas.getContext('2d').putImageData(outImageData, 0, 0);
 
-      const cropX = (tx - x0) * SCALE;
-      const cropY = (ty - y0) * SCALE;
-      const copyW = Math.min(TILE, W - tx) * SCALE;
-      const copyH = Math.min(TILE, H - ty) * SCALE;
+        const cropX = (tx - x0) * SCALE;
+        const cropY = (ty - y0) * SCALE;
+        const copyW = Math.min(TILE, W - tx) * SCALE;
+        const copyH = Math.min(TILE, H - ty) * SCALE;
+        outCtx.drawImage(tmpCanvas, cropX, cropY, copyW, copyH, tx * SCALE, ty * SCALE, copyW, copyH);
 
-      outCtx.drawImage(tmpCanvas, cropX, cropY, copyW, copyH, tx * SCALE, ty * SCALE, copyW, copyH);
-
-      inputTensor.dispose();
-      outTensor.dispose();
-
-      tileCount++;
-      console.log(`[MangaUpscaler Offscreen] tile ${tileCount}/${totalTiles}`);
+        inputTensor.dispose();
+        outTensor.dispose();
+        tileCount++;
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+        console.log(`[MangaUpscaler Offscreen] tile ${tileCount}/${totalTiles} (${elapsed}s)`);
+      }
     }
-  }
 
-  return outCanvas.toDataURL('image/webp', 0.92);
+    const total = ((performance.now() - t0) / 1000).toFixed(2);
+    console.log(`[MangaUpscaler Offscreen] done in ${total}s (${totalTiles} tiles, TILE=${TILE})`);
+    return outCanvas.toDataURL('image/webp', 0.92);
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
