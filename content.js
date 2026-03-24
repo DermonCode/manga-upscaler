@@ -129,6 +129,23 @@
     return true;
   }
 
+  let inmangaBaseUrl = null;
+  function getInmangaBaseUrl() {
+    if (inmangaBaseUrl) return inmangaBaseUrl;
+    for (const script of document.scripts) {
+      const match = script.textContent.match(/var pu = '([^']+)'/);
+      if (match) { inmangaBaseUrl = match[1]; return inmangaBaseUrl; }
+    }
+    return null;
+  }
+
+  function getInmangaRealUrl(img) {
+    if (!img.id || !img.classList.contains('noPageImage')) return null;
+    const base = getInmangaBaseUrl();
+    if (!base) return null;
+    return base.replace('identification.jpg', img.id + '.jpg');
+  }
+
   async function scanImages() {
     const images = document.querySelectorAll('img.ImageContainer');
     console.log('[MangaUpscaler] scan found', images.length, 'ImageContainer images');
@@ -138,6 +155,21 @@
         continue;
       }
       if (processed.has(img)) continue;
+
+      // Pre-load inmanga placeholder images without waiting for scroll
+      const realUrl = getInmangaRealUrl(img);
+      if (realUrl) {
+        processed.add(img);
+        watchImageStyle(img);
+        img.src = realUrl;
+        await waitForLoad(img);
+        if (img.naturalHeight === 0) continue;
+        showLoading(img);
+        queue.push(img);
+        runQueue();
+        continue;
+      }
+
       if (!isMangaImage(img)) continue;
       processed.add(img);
       watchImageStyle(img);
