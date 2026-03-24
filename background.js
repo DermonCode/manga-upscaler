@@ -20,23 +20,26 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   if (msg.type === 'upscale') {
     const tabId = sender.tab.id;
     console.log('[MangaUpscaler BG] upscale request from tab', tabId, msg.url.slice(0, 60));
-    ensureOffscreen()
-      .then(() => {
-        chrome.runtime.sendMessage({
-          type: 'process',
-          tabId,
-          requestId: msg.requestId,
-          url: msg.url,
+    chrome.storage.sync.get({ scale: '2' }, ({ scale }) => {
+      ensureOffscreen()
+        .then(() => {
+          chrome.runtime.sendMessage({
+            type: 'process',
+            tabId,
+            requestId: msg.requestId,
+            url: msg.url,
+            scale,
+          });
+        })
+        .catch((e) => {
+          console.error('[MangaUpscaler BG] ensureOffscreen failed:', e.message);
+          chrome.tabs.sendMessage(tabId, {
+            type: 'upscaleResult',
+            requestId: msg.requestId,
+            error: e.message,
+          });
         });
-      })
-      .catch((e) => {
-        console.error('[MangaUpscaler BG] ensureOffscreen failed:', e.message);
-        chrome.tabs.sendMessage(tabId, {
-          type: 'upscaleResult',
-          requestId: msg.requestId,
-          error: e.message,
-        });
-      });
+    });
   }
 
   if (msg.type === 'processed') {

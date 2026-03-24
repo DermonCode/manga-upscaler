@@ -3,6 +3,7 @@
 
   const processed = new WeakSet();
   const cache = new Map();
+  let cacheBytes = 0;
   const queue = [];
   let running = false;
 
@@ -19,8 +20,14 @@
     });
   }
 
+  function showLoading(img) {
+    img.style.filter = 'blur(6px) brightness(0.4)';
+    img.style.transition = 'filter 0.4s';
+  }
+
   function applyResult(img, result) {
     img.src = result;
+    img.style.filter = '';
     img.style.imageRendering = 'auto';
   }
 
@@ -53,6 +60,7 @@
         });
         const blob = await fetch(result).then(r => r.blob());
         const blobUrl = URL.createObjectURL(blob);
+        cacheBytes += blob.size;
         cache.set(originalSrc, blobUrl);
         console.log('[MangaUpscaler] done, replacing image');
         applyResult(img, blobUrl);
@@ -83,6 +91,7 @@
       processed.add(img);
       await waitForLoad(img);
       if (img.naturalHeight === 0) continue;
+      showLoading(img);
       queue.push(img);
       runQueue();
     }
@@ -106,4 +115,10 @@
     if (needsScan) scanImages();
   });
   obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg.type === 'getCacheStats') {
+      sendResponse({ count: cache.size, bytes: cacheBytes, queued: queue.length });
+    }
+  });
 })();

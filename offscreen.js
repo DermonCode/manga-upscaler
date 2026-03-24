@@ -1,18 +1,21 @@
 console.log('[MangaUpscaler Offscreen] loaded');
 
 let session = null;
+let loadedScale = null;
 
-async function getSession() {
-  if (session) return session;
-  console.log('[MangaUpscaler Offscreen] loading model...');
+async function getSession(scale) {
+  if (session && loadedScale === scale) return session;
+  session = null;
+  console.log('[MangaUpscaler Offscreen] loading model', scale + 'x...');
   const libBase = chrome.runtime.getURL('lib/');
   ort.env.wasm.wasmPaths = libBase;
   ort.env.wasm.numThreads = 1;
-  const modelUrl = chrome.runtime.getURL('models/up2x-denoise3x.onnx');
+  const modelUrl = chrome.runtime.getURL(`models/up${scale}x-denoise3x.onnx`);
   const buf = await fetch(modelUrl).then((r) => r.arrayBuffer());
   session = await ort.InferenceSession.create(buf, {
     executionProviders: ['webgpu', 'wasm'],
   });
+  loadedScale = scale;
   console.log('[MangaUpscaler Offscreen] model loaded, provider:', session.handler.executionProviders);
   return session;
 }
@@ -40,9 +43,9 @@ function tensorToImageData(data, w, h) {
   return new ImageData(px, w, h);
 }
 
-async function upscale(url) {
-  const sess = await getSession();
-  const SCALE = 2;
+async function upscale(url, scale) {
+  const sess = await getSession(scale);
+  const SCALE = parseInt(scale);
   const TILE = 256;
   const PAD = 16;
 
@@ -53,7 +56,7 @@ async function upscale(url) {
   const img = await new Promise((resolve, reject) => {
     const el = new Image();
     el.onload = () => resolve(el);
-    el.onerror = (e) => reject(new Error('image load failed: ' + url));
+    el.onerror = () => reject(new Error('image load failed: ' + url));
     el.src = blobUrl;
   });
 
@@ -64,8 +67,7 @@ async function upscale(url) {
   const srcCanvas = document.createElement('canvas');
   srcCanvas.width = W;
   srcCanvas.height = H;
-  const srcCtx = srcCanvas.getContext('2d');
-  srcCtx.drawImage(img, 0, 0);
+  srcCanvas.getContext('2d').drawImage(img, 0, 0);
   URL.revokeObjectURL(blobUrl);
 
   const outCanvas = document.createElement('canvas');
@@ -98,8 +100,7 @@ async function upscale(url) {
       const results = await sess.run(feeds);
       const outTensor = results[sess.outputNames[0]];
 
-      const outTW = FIXED * SCALE;
-      const outTH = FIXED * SCALE;
+      const [, , outTH, outTW] = outTensor.dims;
       const outImageData = tensorToImageData(outTensor.data, outTW, outTH);
 
       const tmpCanvas = document.createElement('canvas');
@@ -122,13 +123,13 @@ async function upscale(url) {
     }
   }
 
-  return outCanvas.toDataURL('image/png');
+  return outCanvas.toDataURL('image/webp', 0.92);
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type !== 'process') return;
   console.log('[MangaUpscaler Offscreen] process request:', msg.url.slice(0, 60));
-  upscale(msg.url)
+  upscale(msg.url, msg.scale)
     .then((result) => {
       chrome.runtime.sendMessage({
         type: 'processed',
