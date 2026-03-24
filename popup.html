@@ -38,6 +38,14 @@
       font-weight: bold;
       color: #222;
     }
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
     .note {
       margin-top: 10px;
       font-size: 11px;
@@ -53,6 +61,10 @@
     <option value="3">3x</option>
     <option value="4">4x</option>
   </select>
+  <label class="toggle">
+    <input type="checkbox" id="fullWidth">
+    Pantalla completa siempre
+  </label>
   <div class="stats">
     Imágenes en caché: <span id="count">—</span><br>
     RAM usada: <span id="ram">—</span>

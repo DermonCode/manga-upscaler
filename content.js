@@ -1,6 +1,51 @@
 (function () {
   console.log('[MangaUpscaler] content script loaded, url:', location.href);
 
+  const BASE_CSS = [
+    'section { max-width: none !important; }',
+    '.content-wrapper { max-width: none !important; padding-left: 0 !important; padding-right: 0 !important; }',
+    '.content-wrapper .row { margin-left: 0 !important; margin-right: 0 !important; }',
+    '.content-wrapper [class*="col-"] { padding-left: 0 !important; padding-right: 0 !important; }',
+  ].join(' ');
+
+  function imgCSS(fullWidth) {
+    return fullWidth
+      ? 'img.ImageContainer { display: block !important; margin: 0 auto !important; width: 100% !important; }'
+      : 'img.ImageContainer { display: block !important; margin: 0 auto !important; max-width: 100% !important; }';
+  }
+
+  const style = document.createElement('style');
+  document.head.appendChild(style);
+
+  function applyLayoutSetting(fullWidth) {
+    style.textContent = BASE_CSS + ' ' + imgCSS(fullWidth);
+  }
+
+  chrome.storage.sync.get({ fullWidth: false }, ({ fullWidth }) => applyLayoutSetting(fullWidth));
+
+  chrome.storage.onChanged.addListener((changes) => {
+    if (changes.fullWidth) applyLayoutSetting(changes.fullWidth.newValue);
+  });
+
+  // Width of 100% inmanga zoom in px. Increasing makes images bigger at default zoom.
+  const ZOOM_REF_PX = 1200;
+  const styleWatched = new WeakSet();
+
+  function fixImageWidth(img) {
+    const w = img.style.width;
+    if (!w || !w.endsWith('%')) return;
+    const px = Math.round(parseFloat(w) / 100 * ZOOM_REF_PX);
+    img.style.width = px + 'px';
+  }
+
+  function watchImageStyle(img) {
+    if (styleWatched.has(img)) return;
+    styleWatched.add(img);
+    fixImageWidth(img);
+    new MutationObserver(() => fixImageWidth(img))
+      .observe(img, { attributes: true, attributeFilter: ['style'] });
+  }
+
   const processed = new WeakSet();
   const cache = new Map();
   let cacheBytes = 0;
@@ -89,6 +134,7 @@
       if (processed.has(img)) continue;
       if (!isMangaImage(img)) continue;
       processed.add(img);
+      watchImageStyle(img);
       await waitForLoad(img);
       if (img.naturalHeight === 0) continue;
       showLoading(img);

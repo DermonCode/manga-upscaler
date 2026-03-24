@@ -1,11 +1,17 @@
 const sel = document.getElementById('scale');
+const fullWidthCb = document.getElementById('fullWidth');
 
-chrome.storage.sync.get({ scale: '2' }, ({ scale }) => {
+chrome.storage.sync.get({ scale: '2', fullWidth: false }, ({ scale, fullWidth }) => {
   sel.value = scale;
+  fullWidthCb.checked = fullWidth;
 });
 
 sel.addEventListener('change', () => {
   chrome.storage.sync.set({ scale: sel.value });
+});
+
+fullWidthCb.addEventListener('change', () => {
+  chrome.storage.sync.set({ fullWidth: fullWidthCb.checked });
 });
 
 function formatMB(bytes) {
