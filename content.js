@@ -1,3 +1,7 @@
+if (window.__mangaUpscalerInjected) {
+  // Already running (e.g. manifest injection on chapter reload). Skip.
+} else {
+window.__mangaUpscalerInjected = true;
 (function () {
   console.log('[MangaUpscaler] loaded on', location.hostname, '— site:', SITE_ADAPTER.name);
 
@@ -203,3 +207,4 @@
     }
   });
 })();
+} // end else __mangaUpscalerInjected
