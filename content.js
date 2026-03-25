@@ -40,6 +40,7 @@
   }
 
   function applyResult(img, blobUrl) {
+    console.log('[MangaUpscaler] applyResult gen=' + generation + ' src=' + blobUrl.slice(0, 40));
     img.src = blobUrl;
     img.style.filter = '';
     img.style.imageRendering = 'auto';
@@ -99,20 +100,14 @@
       var url = SITE_ADAPTER.resolveImage(img);
       if (!url) continue;
 
-      if (cache.has(url)) { applyResult(img, cache.get(url)); continue; }
+      if (cache.has(url)) { console.log('[MangaUpscaler] cache hit gen=' + generation + ' url=' + url.slice(0, 60)); applyResult(img, cache.get(url)); continue; }
 
       processed.add(img);
       SITE_ADAPTER.setupImage(img);
       await waitForLoad(img);
       if (img.naturalHeight === 0) continue;
       showLoading(img);
-      var rect = img.getBoundingClientRect();
-      var inViewport = rect.top < window.innerHeight && rect.bottom > 0;
-      if (inViewport) {
-        queue.unshift({ img: img, url: url });
-      } else {
-        queue.push({ img: img, url: url });
-      }
+      queue.push({ img: img, url: url });
       runQueue();
     }
   }
@@ -141,13 +136,16 @@
     return SITE_ADAPTER.getChapterId ? SITE_ADAPTER.getChapterId() : location.href;
   }
   var lastChapterId = getChapterId();
+  var initTimer = null;
 
   function onNavigate() {
     var current = getChapterId();
     if (current === lastChapterId) return;
+    console.log('[MangaUpscaler] onNavigate: ' + lastChapterId.slice(0, 8) + ' → ' + current.slice(0, 8) + ' gen=' + generation + ' cacheSize=' + cache.size);
     lastChapterId = current;
-    // Cancel any pending scan immediately so stale cache can't be applied
+    // Cancel any pending scan and init so stale state can't be applied
     if (scanScheduled) { clearTimeout(scanScheduled); scanScheduled = null; }
+    if (initTimer) { clearTimeout(initTimer); initTimer = null; }
     generation++;
     if (SITE_ADAPTER.reset) SITE_ADAPTER.reset();
     cache.clear();
@@ -155,28 +153,45 @@
     queue.length = 0;
     processed = new WeakSet();
     scanPending = false;
-    // Immediately blur all visible images to mask old chapter content while new one loads
-    document.querySelectorAll(SITE_ADAPTER.imageSelector).forEach(showLoading);
-    setTimeout(init, 500); // wait for SPA to render new content
+    document.querySelectorAll(SITE_ADAPTER.imageSelector).forEach(function (img) {
+      img.style.transition = '';
+      img.style.filter = 'blur(6px) brightness(0.4)';
+    });
+    initTimer = setTimeout(function () { initTimer = null; init(); }, 500);
   }
 
   // Intercept pushState so we reset before React even renders the new chapter
   var _origPushState = history.pushState.bind(history);
   history.pushState = function () { _origPushState.apply(history, arguments); onNavigate(); };
   window.addEventListener('popstate', onNavigate);
-  setInterval(onNavigate, 500); // fallback for navigations we might miss
+  setInterval(onNavigate, 100); // fallback for navigations we might miss (must be < MutationObserver debounce of 200ms)
 
   var obs = new MutationObserver(function (mutations) {
     var needsScan = false;
+    var hadChildListChange = false;
     for (var i = 0; i < mutations.length; i++) {
       var m = mutations[i];
-      if (m.type === 'childList') needsScan = true;
+      if (m.type === 'childList') { needsScan = true; hadChildListChange = true; }
       if (m.type === 'attributes' && m.attributeName === 'src') {
         var img = m.target;
         if (!processed.has(img) && SITE_ADAPTER.shouldRescanOnSrcChange(img)) {
           needsScan = true;
         }
       }
+    }
+    // If all chapter images were removed from DOM, React is unmounting the chapter.
+    // Clear cache immediately so the next scan (when new chapter images appear) won't get stale hits.
+    if (hadChildListChange && cache.size > 0 && document.querySelectorAll(SITE_ADAPTER.imageSelector).length === 0) {
+      console.log('[MangaUpscaler] all images removed, chapter transitioning — clearing cache gen=' + generation);
+      generation++;
+      if (SITE_ADAPTER.reset) SITE_ADAPTER.reset(); // clear cdnUrls so next scan won't resolve stale CDN URLs
+      if (initTimer) { clearTimeout(initTimer); initTimer = null; }
+      cache.clear();
+      cacheBytes = 0;
+      queue.length = 0;
+      processed = new WeakSet();
+      scanPending = false;
+      if (scanScheduled) { clearTimeout(scanScheduled); scanScheduled = null; }
     }
     if (needsScan) scheduleScan();
   });
