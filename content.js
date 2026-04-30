@@ -1,40 +1,72 @@
-if (window.__mangaUpscalerInjected) {
-  // Already running (e.g. manifest injection on chapter reload). Skip.
-} else {
-window.__mangaUpscalerInjected = true;
 (function () {
-  console.log('[MangaUpscaler] loaded on', location.hostname, '— site:', SITE_ADAPTER.name);
+  console.log('[MangaUpscaler] content script loaded, url:', location.href);
 
-  // Layout CSS (site-specific)
-  var layoutStyle = null;
-  var layoutCSS = SITE_ADAPTER.getLayoutCSS;
-  if (layoutCSS) {
-    layoutStyle = document.createElement('style');
-    document.head.appendChild(layoutStyle);
-    function applyLayout(fullWidth) {
-      var css = SITE_ADAPTER.getLayoutCSS(fullWidth);
-      if (css) layoutStyle.textContent = css;
+  const isInmanga = location.hostname.includes('inmanga.com');
+  const isManhwaweb = location.hostname.includes('manhwaweb.com');
+
+  const style = document.createElement('style');
+  document.head.appendChild(style);
+
+  function applyLayoutSetting(fullWidth) {
+    if (isInmanga) {
+      const BASE_CSS = [
+        'section { max-width: none !important; }',
+        '.content-wrapper { max-width: none !important; padding-left: 0 !important; padding-right: 0 !important; }',
+        '.content-wrapper .row { margin-left: 0 !important; margin-right: 0 !important; }',
+        '.content-wrapper [class*="col-"] { padding-left: 0 !important; padding-right: 0 !important; }',
+      ].join(' ');
+      const imgCSS = fullWidth
+        ? 'img.ImageContainer { display: block !important; margin: 0 auto !important; width: 100% !important; }'
+        : 'img.ImageContainer { display: block !important; margin: 0 auto !important; max-width: 100% !important; }';
+      style.textContent = BASE_CSS + ' ' + imgCSS;
+    } else if (isManhwaweb && fullWidth) {
+      style.textContent = '[class*="max-w-3xl"] { max-width: none !important; } img.w-full { width: 100% !important; }';
+    } else {
+      style.textContent = '';
     }
-    chrome.storage.sync.get({ fullWidth: false }, function (r) { applyLayout(r.fullWidth); });
-    chrome.storage.onChanged.addListener(function (changes) {
-      if (changes.fullWidth) applyLayout(changes.fullWidth.newValue);
-    });
   }
 
-  var processed = new WeakSet();
-  var cache = new Map();   // CDN url → blob url
-  var cacheBytes = 0;
-  var queue = [];          // [{img, url}]
-  var activeCount = 0;
-  var MAX_CONCURRENT = 1;
-  var generation = 0;      // incremented on chapter change to cancel in-flight requests
+  chrome.storage.sync.get({ fullWidth: false }, ({ fullWidth }) => applyLayoutSetting(fullWidth));
+  chrome.storage.onChanged.addListener((changes) => {
+    if (changes.fullWidth) applyLayoutSetting(changes.fullWidth.newValue);
+  });
+
+  // Width of 100% inmanga zoom in px. Increasing makes images bigger at default zoom.
+  const ZOOM_REF_PX = 1200;
+  const styleWatched = new WeakSet();
+
+  function fixImageWidth(img) {
+    const w = img.style.width;
+    if (!w || !w.endsWith('%')) return;
+    const px = Math.round(parseFloat(w) / 100 * ZOOM_REF_PX);
+    img.style.width = px + 'px';
+  }
+
+  function watchImageStyle(img) {
+    if (styleWatched.has(img)) return;
+    styleWatched.add(img);
+    fixImageWidth(img);
+    new MutationObserver(() => fixImageWidth(img))
+      .observe(img, { attributes: true, attributeFilter: ['style'] });
+  }
+
+  const processed = new WeakSet();
+  const cache = new Map();
+  let cacheBytes = 0;
+  const queue = [];
+  let activeCount = 0;
+  const MAX_CONCURRENT = 1;
+
+  function getSegment() {
+    const parts = window.location.pathname.split('/');
+    return parts[parts.length - 1] || parts[parts.length - 2];
+  }
 
   function waitForLoad(img) {
-    return new Promise(function (resolve) {
+    return new Promise((resolve) => {
       if (img.complete && img.naturalHeight > 0) return resolve();
-      var timer = setTimeout(resolve, 15000);
-      img.addEventListener('load', function () { clearTimeout(timer); resolve(); }, { once: true });
-      img.addEventListener('error', function () { clearTimeout(timer); resolve(); }, { once: true });
+      img.addEventListener('load', () => resolve(), { once: true });
+      img.addEventListener('error', () => resolve(), { once: true });
     });
   }
 
@@ -43,21 +75,23 @@ window.__mangaUpscalerInjected = true;
     img.style.transition = 'filter 0.4s';
   }
 
-  function applyResult(img, blobUrl) {
-    console.log('[MangaUpscaler] applyResult gen=' + generation + ' src=' + blobUrl.slice(0, 40));
-    img.src = blobUrl;
+  function applyResult(img, result) {
+    img.src = result;
     img.style.filter = '';
     img.style.imageRendering = 'auto';
   }
 
-  async function processImage(img, url) {
-    var gen = generation;
+  async function processImage(img) {
     if (!img.isConnected) return;
-    if (cache.has(url)) { applyResult(img, cache.get(url)); return; }
-    console.log('[MangaUpscaler] processing:', url.slice(0, 80));
+    const originalSrc = img.src;
+    if (cache.has(originalSrc)) {
+      applyResult(img, cache.get(originalSrc));
+      return;
+    }
+    console.log('[MangaUpscaler] processing:', originalSrc.slice(0, 80));
     try {
-      var requestId = crypto.randomUUID();
-      var result = await new Promise(function (resolve, reject) {
+      const requestId = crypto.randomUUID();
+      const result = await new Promise((resolve, reject) => {
         function handler(msg) {
           if (msg.type === 'upscaleResult' && msg.requestId === requestId) {
             chrome.runtime.onMessage.removeListener(handler);
@@ -66,16 +100,14 @@ window.__mangaUpscalerInjected = true;
           }
         }
         chrome.runtime.onMessage.addListener(handler);
-        chrome.runtime.sendMessage({ type: 'upscale', requestId: requestId, url: url }, function () {
+        chrome.runtime.sendMessage({ type: 'upscale', requestId, url: originalSrc, segment: getSegment() }, () => {
           if (chrome.runtime.lastError) {}
         });
       });
-      if (gen !== generation) return; // chapter changed while processing
-      var blob = await fetch(result).then(function (r) { return r.blob(); });
-      var blobUrl = URL.createObjectURL(blob);
-      if (gen !== generation) return; // chapter changed while fetching blob
+      const blob = await fetch(result).then(r => r.blob());
+      const blobUrl = URL.createObjectURL(blob);
       cacheBytes += blob.size;
-      cache.set(url, blobUrl);
+      cache.set(originalSrc, blobUrl);
       console.log('[MangaUpscaler] done, replacing image');
       applyResult(img, blobUrl);
     } catch (e) {
@@ -86,125 +118,113 @@ window.__mangaUpscalerInjected = true;
   function runQueue() {
     while (queue.length > 0 && activeCount < MAX_CONCURRENT) {
       activeCount++;
-      var item = queue.shift();
-      processImage(item.img, item.url).finally(function () {
+      const img = queue.shift();
+      processImage(img).finally(() => {
         activeCount--;
         runQueue();
       });
     }
   }
 
+  function isMangaImage(img) {
+    if (!img.src || img.src.startsWith('data:')) return false;
+    if (/\.(gif|svg|webp)$/i.test(img.src)) return false;
+    if (img.src.includes(location.hostname)) return false;
+    return true;
+  }
+
+  let inmangaBaseUrl = null;
+  function getInmangaBaseUrl() {
+    if (inmangaBaseUrl) return inmangaBaseUrl;
+    for (const script of document.scripts) {
+      const match = script.textContent.match(/var pu = '([^']+)'/);
+      if (match) { inmangaBaseUrl = match[1]; return inmangaBaseUrl; }
+    }
+    return null;
+  }
+
+  function getInmangaRealUrl(img) {
+    if (!img.id || !img.classList.contains('noPageImage')) return null;
+    const base = getInmangaBaseUrl();
+    if (!base) return null;
+    return base.replace('identification.jpg', img.id + '.jpg');
+  }
+
   async function scanImages() {
-    var images = document.querySelectorAll(SITE_ADAPTER.imageSelector);
-    console.log('[MangaUpscaler] scan found', images.length, 'images');
-    for (var i = 0; i < images.length; i++) {
-      var img = images[i];
+    let allImages;
+    if (isInmanga) {
+      allImages = document.querySelectorAll('img.ImageContainer');
+    } else if (isManhwaweb) {
+      allImages = document.querySelectorAll('img.w-full');
+    } else {
+      return;
+    }
+    console.log('[MangaUpscaler] scan found', allImages.length, 'images');
+
+    // First pass: synchronously mark all eligible images and kick off their loads.
+    // No awaits here so concurrent scanImages calls (triggered by MutationObserver
+    // during upscaling) see every image already claimed and can't queue them out of order.
+    const toProcess = [];
+    for (const img of allImages) {
+      if (cache.has(img.src)) {
+        applyResult(img, cache.get(img.src));
+        continue;
+      }
       if (processed.has(img)) continue;
 
-      var url = SITE_ADAPTER.resolveImage(img);
-      if (!url) continue;
+      if (isInmanga) {
+        const realUrl = getInmangaRealUrl(img);
+        if (realUrl) {
+          processed.add(img);
+          watchImageStyle(img);
+          img.src = realUrl;
+          toProcess.push(img);
+          continue;
+        }
+      }
 
-      if (cache.has(url)) { console.log('[MangaUpscaler] cache hit gen=' + generation + ' url=' + url.slice(0, 60)); applyResult(img, cache.get(url)); continue; }
+      if (isManhwaweb && img.loading === 'lazy') {
+        img.loading = 'eager';
+      }
 
+      if (!isMangaImage(img)) continue;
       processed.add(img);
-      SITE_ADAPTER.setupImage(img);
+      if (isInmanga) watchImageStyle(img);
+      toProcess.push(img);
+    }
+
+    // Second pass: await each load and enqueue in DOM order.
+    for (const img of toProcess) {
       await waitForLoad(img);
       if (img.naturalHeight === 0) continue;
       showLoading(img);
-      queue.push({ img: img, url: url });
+      queue.push(img);
       runQueue();
     }
   }
 
-  var scanPending = false;
-  var scanScheduled = null;
+  scanImages();
 
-  function scheduleScan() {
-    if (scanScheduled) clearTimeout(scanScheduled);
-    scanScheduled = setTimeout(function () {
-      scanScheduled = null;
-      if (scanPending) return;
-      scanPending = true;
-      scanImages().finally(function () { scanPending = false; });
-    }, 200);
-  }
-
-  async function init() {
-    if (SITE_ADAPTER.init) await SITE_ADAPTER.init();
-    scanImages();
-  }
-  init();
-
-  // SPA navigation detection: reset state and re-init when chapter changes
-  function getChapterId() {
-    return SITE_ADAPTER.getChapterId ? SITE_ADAPTER.getChapterId() : location.href;
-  }
-  var lastChapterId = getChapterId();
-  var initTimer = null;
-
-  function onNavigate() {
-    var current = getChapterId();
-    if (current === lastChapterId) return;
-    console.log('[MangaUpscaler] onNavigate: ' + lastChapterId.slice(0, 8) + ' → ' + current.slice(0, 8) + ' gen=' + generation + ' cacheSize=' + cache.size);
-    lastChapterId = current;
-    // Cancel any pending scan and init so stale state can't be applied
-    if (scanScheduled) { clearTimeout(scanScheduled); scanScheduled = null; }
-    if (initTimer) { clearTimeout(initTimer); initTimer = null; }
-    generation++;
-    if (SITE_ADAPTER.reset) SITE_ADAPTER.reset();
-    cache.clear();
-    cacheBytes = 0;
-    queue.length = 0;
-    processed = new WeakSet();
-    scanPending = false;
-    document.querySelectorAll(SITE_ADAPTER.imageSelector).forEach(function (img) {
-      img.style.transition = '';
-      img.style.filter = 'blur(6px) brightness(0.4)';
-    });
-    initTimer = setTimeout(function () { initTimer = null; init(); }, 500);
-  }
-
-  // Intercept pushState so we reset before React even renders the new chapter
-  var _origPushState = history.pushState.bind(history);
-  history.pushState = function () { _origPushState.apply(history, arguments); onNavigate(); };
-  window.addEventListener('popstate', onNavigate);
-  setInterval(onNavigate, 100); // fallback for navigations we might miss (must be < MutationObserver debounce of 200ms)
-
-  var obs = new MutationObserver(function (mutations) {
-    var needsScan = false;
-    var hadChildListChange = false;
-    for (var i = 0; i < mutations.length; i++) {
-      var m = mutations[i];
-      if (m.type === 'childList') { needsScan = true; hadChildListChange = true; }
+  const obs = new MutationObserver((mutations) => {
+    let needsScan = false;
+    for (const m of mutations) {
+      if (m.type === 'childList') needsScan = true;
       if (m.type === 'attributes' && m.attributeName === 'src') {
-        var img = m.target;
-        if (!processed.has(img) && SITE_ADAPTER.shouldRescanOnSrcChange(img)) {
+        const img = m.target;
+        if (cache.has(img.src)) {
+          applyResult(img, cache.get(img.src));
+        } else if (isMangaImage(img) && !processed.has(img)) {
           needsScan = true;
         }
       }
     }
-    // If all chapter images were removed from DOM, React is unmounting the chapter.
-    // Clear cache immediately so the next scan (when new chapter images appear) won't get stale hits.
-    if (hadChildListChange && cache.size > 0 && document.querySelectorAll(SITE_ADAPTER.imageSelector).length === 0) {
-      console.log('[MangaUpscaler] all images removed, chapter transitioning — clearing cache gen=' + generation);
-      generation++;
-      if (SITE_ADAPTER.reset) SITE_ADAPTER.reset(); // clear cdnUrls so next scan won't resolve stale CDN URLs
-      if (initTimer) { clearTimeout(initTimer); initTimer = null; }
-      cache.clear();
-      cacheBytes = 0;
-      queue.length = 0;
-      processed = new WeakSet();
-      scanPending = false;
-      if (scanScheduled) { clearTimeout(scanScheduled); scanScheduled = null; }
-    }
-    if (needsScan) scheduleScan();
+    if (needsScan) scanImages();
   });
   obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
 
-  chrome.runtime.onMessage.addListener(function (msg, _sender, sendResponse) {
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === 'getCacheStats') {
       sendResponse({ count: cache.size, bytes: cacheBytes, queued: queue.length });
     }
   });
 })();
-} // end else __mangaUpscalerInjected
