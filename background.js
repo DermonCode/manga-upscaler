@@ -16,6 +16,16 @@ function ensureOffscreen() {
   return offscreenPromise;
 }
 
+chrome.webNavigation.onHistoryStateUpdated.addListener(function (details) {
+  if (details.frameId !== 0) return;
+  if (/^https?:\/\/mangadex\.org\/chapter\//.test(details.url)) {
+    chrome.scripting.executeScript({
+      target: { tabId: details.tabId },
+      files: ['sites/mangadex.js', 'content.js'],
+    }).catch(function () {});
+  }
+});
+
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (msg.type === 'upscale') {
     const tabId = sender.tab.id;
