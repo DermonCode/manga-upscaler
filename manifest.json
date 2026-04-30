@@ -10,7 +10,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://inmanga.com/ver/manga/*"],
+      "matches": ["*://inmanga.com/ver/manga/*", "*://manhwaweb.com/leer/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

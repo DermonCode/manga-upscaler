@@ -1,28 +1,32 @@
 (function () {
   console.log('[MangaUpscaler] content script loaded, url:', location.href);
 
-  const BASE_CSS = [
-    'section { max-width: none !important; }',
-    '.content-wrapper { max-width: none !important; padding-left: 0 !important; padding-right: 0 !important; }',
-    '.content-wrapper .row { margin-left: 0 !important; margin-right: 0 !important; }',
-    '.content-wrapper [class*="col-"] { padding-left: 0 !important; padding-right: 0 !important; }',
-  ].join(' ');
-
-  function imgCSS(fullWidth) {
-    return fullWidth
-      ? 'img.ImageContainer { display: block !important; margin: 0 auto !important; width: 100% !important; }'
-      : 'img.ImageContainer { display: block !important; margin: 0 auto !important; max-width: 100% !important; }';
-  }
+  const isInmanga = location.hostname.includes('inmanga.com');
+  const isManhwaweb = location.hostname.includes('manhwaweb.com');
 
   const style = document.createElement('style');
   document.head.appendChild(style);
 
   function applyLayoutSetting(fullWidth) {
-    style.textContent = BASE_CSS + ' ' + imgCSS(fullWidth);
+    if (isInmanga) {
+      const BASE_CSS = [
+        'section { max-width: none !important; }',
+        '.content-wrapper { max-width: none !important; padding-left: 0 !important; padding-right: 0 !important; }',
+        '.content-wrapper .row { margin-left: 0 !important; margin-right: 0 !important; }',
+        '.content-wrapper [class*="col-"] { padding-left: 0 !important; padding-right: 0 !important; }',
+      ].join(' ');
+      const imgCSS = fullWidth
+        ? 'img.ImageContainer { display: block !important; margin: 0 auto !important; width: 100% !important; }'
+        : 'img.ImageContainer { display: block !important; margin: 0 auto !important; max-width: 100% !important; }';
+      style.textContent = BASE_CSS + ' ' + imgCSS;
+    } else if (isManhwaweb && fullWidth) {
+      style.textContent = '[class*="max-w-3xl"] { max-width: none !important; } img.w-full { width: 100% !important; }';
+    } else {
+      style.textContent = '';
+    }
   }
 
   chrome.storage.sync.get({ fullWidth: false }, ({ fullWidth }) => applyLayoutSetting(fullWidth));
-
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.fullWidth) applyLayoutSetting(changes.fullWidth.newValue);
   });
@@ -147,32 +151,50 @@
   }
 
   async function scanImages() {
-    const images = document.querySelectorAll('img.ImageContainer');
-    console.log('[MangaUpscaler] scan found', images.length, 'ImageContainer images');
-    for (const img of images) {
+    let allImages;
+    if (isInmanga) {
+      allImages = document.querySelectorAll('img.ImageContainer');
+    } else if (isManhwaweb) {
+      allImages = document.querySelectorAll('img.w-full');
+    } else {
+      return;
+    }
+    console.log('[MangaUpscaler] scan found', allImages.length, 'images');
+
+    // First pass: synchronously mark all eligible images and kick off their loads.
+    // No awaits here so concurrent scanImages calls (triggered by MutationObserver
+    // during upscaling) see every image already claimed and can't queue them out of order.
+    const toProcess = [];
+    for (const img of allImages) {
       if (cache.has(img.src)) {
         applyResult(img, cache.get(img.src));
         continue;
       }
       if (processed.has(img)) continue;
 
-      // Pre-load inmanga placeholder images without waiting for scroll
-      const realUrl = getInmangaRealUrl(img);
-      if (realUrl) {
-        processed.add(img);
-        watchImageStyle(img);
-        img.src = realUrl;
-        await waitForLoad(img);
-        if (img.naturalHeight === 0) continue;
-        showLoading(img);
-        queue.push(img);
-        runQueue();
-        continue;
+      if (isInmanga) {
+        const realUrl = getInmangaRealUrl(img);
+        if (realUrl) {
+          processed.add(img);
+          watchImageStyle(img);
+          img.src = realUrl;
+          toProcess.push(img);
+          continue;
+        }
+      }
+
+      if (isManhwaweb && img.loading === 'lazy') {
+        img.loading = 'eager';
       }
 
       if (!isMangaImage(img)) continue;
       processed.add(img);
-      watchImageStyle(img);
+      if (isInmanga) watchImageStyle(img);
+      toProcess.push(img);
+    }
+
+    // Second pass: await each load and enqueue in DOM order.
+    for (const img of toProcess) {
       await waitForLoad(img);
       if (img.naturalHeight === 0) continue;
       showLoading(img);
